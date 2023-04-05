@@ -1,0 +1,461 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.AI;
+
+public class Access3DAnimTrans : MonoBehaviour
+{
+    enum AnimDirection { Inactive, Active }
+    public enum AnimTrans { Move, Rotate }
+    public enum AnimTransAnimType { Lerp, Rigid }
+
+    [Serializable]
+    public class Access3DAnimTransData
+    {
+        public AnimTransAnimType animType;
+        public Vector3 targetVector;
+        public float animSpd;
+        public LangKeyCode KeyAccessType;
+        public Access3DAnimTransSubAnim subAnim;
+    }
+
+    [Serializable]
+    public class Access3DAnimTransSubAnim
+    {
+        public Animation anim;
+        public string name;
+        public float speed;
+    }
+
+    [Serializable]
+    public class Access3DAnimTransSound
+    {
+        public bool isActive;
+        public AudioClip clip;
+        public float triggerDeltaTime;
+
+        [HideInInspector] public bool hasPlayed;
+        [HideInInspector] public float deltaTime;
+    }
+
+    Access3D root;
+    Transform t;
+    bool canPlaySound;
+    Vector3 lastPos;
+    Quaternion lastRot;
+    List<AudioSource> aud = new List<AudioSource>();
+
+    [HideInInspector] public int index;
+    [HideInInspector] public Collider[] collider;
+    [HideInInspector] public Access3DAnimTrans prohibiter; // like fridge drawer inside fridge door
+    [HideInInspector] public int paramWhenAccessEnter; // param to pass when onaccessenter is called
+
+    public delegate void OnAccessActiveEnter(Access3DAnimTrans client);
+    public OnAccessActiveEnter onAccessActiveEnter;
+
+    public delegate void OnAccessEnter(Access3DAnimTrans client);
+    public OnAccessEnter onAccessEnter;
+
+    public delegate void OnAccessEnter2(Access3DAnimTrans client, bool byUser);
+    public OnAccessEnter2 onAccessEnter2;
+
+    public Item.ID[] requiredItem;
+    public AnimTrans type;
+    public bool isActive; // stay active or inactive on start with anim at end frame?
+    public bool isSequential; // increase index sequentially like rotating switch
+    public Access3DAnimTransData[] data;
+    public Access3DAnimTransSound[] sound;
+    public Access3DAnimTrans[] prohibitee; // has others inside like fridge drawer inside fridge door	
+    public bool checkUserTransSide;
+    public Vector3 transDirection;
+    public Access3DAnimTrans[] sibling; // sync status like closet with 2 doors
+    public NavMeshObstacle navObst;
+    public bool prohibitRandomActive;
+    public bool prohibitAccessWhenEnabled;
+
+    void Awake()
+    {
+        root = GetComponentInParent<Access3D>();
+
+        // called from Access3D by ray director on start being raycasted
+        root.setMainWindow += SetWindow;
+        root.process = Process;
+
+        root.SetOutline(root.transform);
+
+        t = transform;
+
+        collider = GetComponentsInChildren<Collider>();
+
+        SetProhibitee();
+        SetProhibiter();
+
+        StartCoroutine(SetInitialState());
+    }
+
+    private void Start()
+    {
+        SetKeyAccessType();
+    }
+
+    IEnumerator SetInitialState()
+    {
+        // wait until items loaded
+        while (!Manager.logic.hasLoadedAllScene)
+            yield return null;
+
+        yield return null;
+
+        if (!isSequential)
+        {
+            if (!prohibitRandomActive &&
+                Manager.HasRequiredItem(requiredItem, false, true))
+                isActive = Manager.Percentage() > 50 ? true : false;
+
+            // cant activate if prohibiter is not active
+            if (prohibiter &&
+                !IsProhibiterActive())
+                isActive = false;
+
+            CheckNavObst();
+            PlayAnim(true);
+        }
+    }
+
+    private void Update()
+    {
+        PlayAnim(false);
+        PlaySound();
+
+        if (!IsPlayingAnim() && !IsPlayingSound())
+            Deactivate();
+
+        lastPos = t.localPosition;
+        lastRot = t.localRotation;
+    }
+
+    void Process()
+    {
+        CheckProhibit();
+    }
+
+    void SetProhibitee()
+    {
+        for (int i = 0; i < prohibitee.Length; i++)
+            prohibitee[i].prohibiter = this;
+    }
+
+    void CheckNavObst()
+    {
+        // if open like door use nav obstacle
+        if (navObst)
+        {
+            navObst.carving =
+                navObst.carveOnlyStationary = isActive;
+        }
+    }
+
+    public void CheckProhibit()
+    {
+        root.prohibitAccess = IsProhibiteeActive();
+
+        // if has prohibiter wait until it is over 90 deg (open wide enough)
+        if (prohibiter)
+            root.prohibitAccess = !IsProhibiterOpenOver(90);
+
+        if (prohibitAccessWhenEnabled)
+            root.prohibitAccess = enabled;
+    }
+
+    void SetProhibiter()
+    {
+        if (IsRotate())
+            for (int i = 0; i < prohibitee.Length; i++)
+                prohibitee[i].prohibiter = this;
+    }
+
+    bool IsProhibiterOpenOver(float degree)
+    {
+        return Mathf.Abs(Quaternion.Angle(prohibiter.t.localRotation, Quaternion.Euler(prohibiter.data[0].targetVector))) >= degree;
+    }
+
+    bool IsProhibiterActive()
+    {
+        return prohibiter.isActive;
+    }
+
+    public static float Clamp0360(float eulerAngles)
+    {
+        float result = eulerAngles - Mathf.CeilToInt(eulerAngles / 360f) * 360f;
+        
+        if (result < 0)
+        {
+            result += 360f;
+        }
+
+        return result;
+    }
+
+    public bool IsPlayingAnim()
+    {
+        return t.localPosition != lastPos || t.localRotation != lastRot;
+    }
+
+    public bool IsFullyInactive() // fully closed
+    {
+        return !isActive && 
+            IsMove()? t.localPosition == data[(int)AnimDirection.Inactive].targetVector : // move
+            t.localRotation == Quaternion.Euler(data[(int)AnimDirection.Inactive].targetVector); // rotate
+    }
+
+    bool IsMove()
+    {
+        return type == AnimTrans.Move;
+    }
+
+    bool IsRotate()
+    {
+        return type == AnimTrans.Rotate;
+    }
+
+    bool IsProhibiteeActive()
+    {
+        for (int i = 0; i < prohibitee.Length; i++)
+            if (prohibitee[i].isActive)
+                return true;
+
+        return false;
+    }
+
+    public void SetWindow()
+    {
+        root.Canvas().entity.SetWindow(false);
+
+        // set sub-windows based on purchase state
+        root.Canvas().setPurchaseCallbackWindow = SetPurchaseCallbackWindow;
+
+        root.Canvas().OnCloseEnter();
+
+        if (Manager.HasRequiredItem(requiredItem, true, true))
+        {
+            OnAccessCommon(Manager.GetUserFPS().entity.center.position, true);
+
+            // activate siblings, only the ones that are in different state
+            for (int i = 0; i < sibling.Length; i++)
+                if (sibling[i].isActive != isActive)
+                    sibling[i].OnAccessCommon(Manager.GetUserFPS().entity.center.position, true);
+        }
+    }
+
+    public void OnAccessCommon(Vector3 origin, bool byUser)
+    {
+        Deactivate();
+
+        enabled = true;
+
+        if (isSequential)
+        {
+            isActive = true;
+
+            if (++index >= data.Length)
+                index = 0;
+        }
+        else
+        {
+            isActive = !isActive;
+
+            CheckNavObst();
+        }
+
+        SetKeyAccessType();
+
+        if (isActive)
+        {
+            if (IsUserInTransDirection(origin))
+                Manager.m.activeAccess3DAnimTrans.Add(this);
+
+            CheckLock();
+        }
+
+        InitSound();
+        InitAnim();
+
+        if (byUser)
+        {
+            root.CheckMonsterVolumeAlert();
+
+            if (isActive && onAccessActiveEnter != null)
+                onAccessActiveEnter(this);
+        }
+
+        if (onAccessEnter != null)
+            onAccessEnter(this);
+
+        if (onAccessEnter2 != null)
+            onAccessEnter2(this, byUser);
+    }
+
+    void CheckLock()
+    {
+        Access3DItemLock itemLock = GetComponent<Access3DItemLock>();
+
+        if (itemLock)
+            itemLock.Unlock();
+    }
+
+    public void SetKeyAccessType()
+    {
+        root.KeyAccessType = data[Index()].KeyAccessType;
+    }
+
+    public void OnBlocked()
+    {
+        Deactivate();
+
+        isActive = false;
+
+        SetKeyAccessType();
+
+        Manager.GetCanvasFPS().refreshCenterInfo = true;
+    }
+
+    public void Deactivate()
+    {
+        InitAud();
+
+        Manager.m.RemoveActiveAccess3DAnimTrans(this);
+
+        enabled = false;
+    }
+
+    int Index()
+    {
+        if (isSequential)
+            return index;
+        else
+            return isActive ? 1 : 0;
+    }
+
+    void InitAnim()
+    {
+        Manager.m.SetTagTo(t, "Access3DAnimTrans");
+
+        Access3DAnimTransData data = this.data[Index()];
+
+        if (data.subAnim.anim)
+        {
+            data.subAnim.anim[data.subAnim.name].speed = data.subAnim.speed;
+            data.subAnim.anim.Play(data.subAnim.name);
+        }
+    }
+
+    void PlayAnim(bool skip)
+    {
+        Access3DAnimTransData data = this.data[Index()];
+
+        if (IsMove())
+        {
+            if (data.animType == AnimTransAnimType.Lerp)
+                t.localPosition = Vector3.Lerp(t.localPosition, data.targetVector, skip ? 10 * data.animSpd : Time.deltaTime * data.animSpd);
+            else
+                t.localPosition = Vector3.MoveTowards(t.localPosition, data.targetVector, skip ? 10 * data.animSpd : Time.deltaTime * data.animSpd);
+        }
+        else if (IsRotate())
+        {
+            if (data.animType == AnimTransAnimType.Lerp)
+                t.localRotation = Quaternion.Lerp(t.localRotation, Quaternion.Euler(data.targetVector), skip ? 10 * data.animSpd : Time.deltaTime * data.animSpd);
+            else
+                t.localRotation = Quaternion.RotateTowards(t.localRotation, Quaternion.Euler(data.targetVector), skip ? 10 * data.animSpd : Time.deltaTime * data.animSpd * 10);
+        }
+    }
+
+    void InitSound()
+    {
+        canPlaySound = true;
+
+        for (int i = 0; i < sound.Length; i++)
+        {
+            sound[i].hasPlayed = false;
+            sound[i].deltaTime = 0;
+        }
+
+        InitAud();
+    }
+
+    void InitAud()
+    {
+        for (int i = 0; i < aud.Count; i++)
+            if (aud[i])
+                aud[i].Stop();
+
+        aud.Clear();
+    }
+
+    bool IsPlayingSound()
+    {
+        bool result = false;
+
+        for (int i = 0; i < aud.Count; i++)
+            if (aud[i])
+                result = true;
+
+        return result;
+    }
+
+    void PlaySound()
+    {
+        if (canPlaySound)
+        {
+            for (int i = 0; i < sound.Length; i++)
+            {
+                sound[i].deltaTime += Time.deltaTime;
+
+                if (sound[i].deltaTime > sound[i].triggerDeltaTime &&
+                    sound[i].isActive == isActive &&
+                    !sound[i].hasPlayed)
+                {
+                    sound[i].hasPlayed = true;
+
+                    aud.Add(Manager.GetWorldSound(t.position).Set(sound[i].clip, 1, 4, false));
+                }
+            }
+        }
+    }
+
+    public void SetPurchaseCallbackWindow()
+    {
+        root.CommonCallbackWindow();
+    }
+
+    public bool HasSameCollider(Collider client)
+    {
+        for (int i = 0; i < collider.Length; i++)
+            if (collider[i] == client)
+                return true;
+
+        return false;
+    }
+
+    bool IsUserInTransDirection(Vector3 origin)
+    {
+        Vector3 transLocal = root.GetLocalDirection(transDirection);
+
+        Bounds bounds = GetComponentInChildren<Renderer>().bounds;
+
+        Vector3 vec = bounds.center + transLocal;
+
+        Debug.DrawLine(vec, origin, Color.green, 0.5f);
+
+        Vector3 vecReverse = bounds.center + transLocal * -1;
+
+        Debug.DrawLine(vecReverse, origin, Color.red, 0.5f);
+
+        return checkUserTransSide && (vec - origin).sqrMagnitude < (vecReverse - origin).sqrMagnitude;
+    }
+
+    public bool RequireItem()
+    {
+        return requiredItem.Length > 0;
+    }
+}
