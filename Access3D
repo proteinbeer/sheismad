@@ -1,0 +1,602 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEditor;
+
+public class Access3D : MonoBehaviour
+{
+    public delegate void OnFound();
+    public OnFound onFound;
+
+    public delegate string GetInfoText();
+    public GetInfoText getInfoText;
+
+    public enum Access3DAvailableBy { User, User_Monster }
+
+    [HideInInspector] public Transform t;
+    [HideInInspector] public GameObject go;
+    [HideInInspector] public Rigidbody rb;
+    [HideInInspector] public Access3DManager manager;
+
+    [HideInInspector] public delegate void SetWindow();
+
+    [HideInInspector] public delegate void Process();
+    [HideInInspector] public Process process;
+
+    [HideInInspector] public SetWindow setMainWindow;
+    [HideInInspector] public SetWindow setWindow;
+    [HideInInspector] public SetWindow setWindow2;
+    [HideInInspector] public bool flag;
+    [HideInInspector] public bool prohibitAccess; // hide outline too
+    [HideInInspector] public bool prohibitInteration; // only show outline    
+    [HideInInspector] public bool hasInit;
+    [HideInInspector] public string desc;
+    [HideInInspector] public string spec;
+    [HideInInspector] public float distFromHoverCam;
+    [HideInInspector] public float rayHitDist;
+    [HideInInspector] public GautamaRequired gautamaRequired;
+    [HideInInspector] public GautamaBenefit gautamaBenefit;
+    [HideInInspector] public HideFromLesserDemon hideFromLesserDemon;
+    [HideInInspector] public HideFromLesserAngel hideFromLesserAngel;
+    [HideInInspector] public HinderBlock hinderBlock;
+    [HideInInspector] public ConfuseBlock confuseBlock;
+    [HideInInspector] public CastKeep castKeep;
+    [HideInInspector] public CastRequired castRequired;
+    [HideInInspector] public Access3DCast cast;
+    [HideInInspector] public Item item;
+    [HideInInspector] public Access3DItemWield wield;
+    [HideInInspector] public Access3DItemCheck check;
+    [HideInInspector] public Access3DItemCollect collect;
+    [HideInInspector] public ShieldDemon shieldDemon;
+    [HideInInspector] public ShieldAngel shieldAngel;
+    [HideInInspector] public WaySeekerRemember waySeekerRemember;
+
+    LangKeyCode initialKeyAccessType;
+    StoryRestriction restriction;
+
+    public LangKeyCode keyName;
+    public LangKeyCode KeyAccessType;
+    public bool hideAccessTypeIfProhibitInteration; // hide KeyAccessType if prohibitInteration is active
+    public Entity entity;
+    public Transform renderTargetPoint;
+    public Fracturable fracturable;
+    public int volumeLevel;
+    public Access3DAvailableBy availableBy;
+    public Sprite customIcon;
+    public AudioSource audLoop;
+
+    private void Awake()
+    {
+        t = transform;
+        go = gameObject;
+
+        initialKeyAccessType = KeyAccessType;
+
+        getInfoText = GetInfoTextDefault;
+
+        restriction = GetComponent<StoryRestriction>();
+        check = GetComponent<Access3DItemCheck>();
+        wield = GetComponent<Access3DItemWield>();
+        collect = GetComponent<Access3DItemCollect>();
+        castRequired = GetComponent<CastRequired>();
+        gautamaRequired = GetComponent<GautamaRequired>();
+
+        if (wield || collect)
+        {
+            waySeekerRemember = GetComponent<WaySeekerRemember>();
+            gautamaBenefit = GetComponent<GautamaBenefit>();
+            hideFromLesserDemon = GetComponent<HideFromLesserDemon>();
+            hideFromLesserAngel = GetComponent<HideFromLesserAngel>();
+            shieldDemon = GetComponent<ShieldDemon>();
+            shieldAngel = GetComponent<ShieldAngel>();
+            hinderBlock = GetComponent<HinderBlock>();
+            confuseBlock = GetComponent<ConfuseBlock>();
+            castKeep = GetComponent<CastKeep>();
+            cast = GetComponent<Access3DCast>();
+            item = GetComponent<Item>();
+        }
+
+        if (audLoop)
+            Option.AddAudSF(audLoop);
+    }
+
+    private void Init()
+    {
+        if (!renderTargetPoint)
+            renderTargetPoint = t;
+
+        Manager.GetCanvasRayDirector().AddEntity(this);
+
+        Manager.m.access3dManager.list.Add(this);
+
+        if (wield)
+            wield.Init();
+
+        if (check)
+            check.Init();
+
+        if (collect)
+            collect.Init();
+
+        hasInit = true;
+    }
+
+    private void Start()
+    {
+        CheckRestriction();
+    }
+
+    public void SetKeyAccess(LangKeyCode newKey)
+    {
+        KeyAccessType = newKey;
+    }
+
+    public void RevertToInitialKeyAccess()
+    {
+        KeyAccessType = initialKeyAccessType;
+    }
+
+    public bool HasCustomIcon()
+    {
+        return customIcon != null;
+    }
+
+    public bool IsCastee()
+    {
+        return castRequired != null;
+    }
+
+    public bool IsAvailableByMonster()
+    {
+        return availableBy == Access3DAvailableBy.User_Monster;
+    }
+
+    void CheckRestriction()
+    {
+        if (restriction && restriction.IsRestrictionOn())
+        {
+            if (restriction.IsTypeResultDeactivate())
+            {
+                Destroy(this);
+
+                if (check)
+                    Destroy(check);
+
+                if (wield)
+                    Destroy(wield);
+
+                if (collect)
+                    Destroy(collect);
+            }
+            else if (restriction.IsTypeResultDestroy())
+            {
+                Destroy(gameObject);
+            }
+        }
+        else
+        {
+            Init();
+        }
+    }
+
+    public string GetInfoTextDefault()
+    {
+        Manager.stringBuilder.Length = 0;
+
+        Manager.stringBuilder.Append("<color=#FFFFFF>");
+        Manager.stringBuilder.Append(Localization.GetTranslated(keyName));
+        Manager.stringBuilder.Append("</color>");
+
+        if (HasKeyAccessType() &&
+            CanUseKeyAccessType())
+        {
+            Manager.stringBuilder.Append("\n");
+            Manager.stringBuilder.Append(Localization.GetTranslated(KeyAccessType));
+        }
+
+        return Manager.stringBuilder.ToString();
+    }
+
+    public bool HasKeyAccessType()
+    {
+        return KeyAccessType != LangKeyCode.None;
+    }
+
+    bool CanUseKeyAccessType()
+    {
+        if (hideAccessTypeIfProhibitInteration &&
+            prohibitInteration)
+            return false;
+
+        return true;
+    }
+
+    public void SetRenderTargetPoint(Transform point)
+    {
+        renderTargetPoint = point;
+    }
+
+    public void SetCanvas(bool flag)
+    {
+        // close all window
+        Canvas().entity.SetWindow(false);
+
+        Canvas().Set(flag);
+
+        if (flag)
+        {
+            // set canvas access 3d to show
+            Canvas().Init(this,
+                    distFromHoverCam, // dist
+                    55, // angle
+                    10); // rot spd
+
+            setMainWindow();
+        }
+
+        if (this.flag != flag)
+        {
+            this.flag = flag;
+        }
+    }
+
+    public CanvasAccess3D Canvas()
+    {
+        return Manager.GetCanvasAccess3D();
+    }
+
+    public void ShowWindow(RectTransform t, bool flag)
+    {
+        Canvas().entity.FindCanvasWindow(t).enabled = flag;
+    }
+
+    public void CommonCallbackWindow()
+    {
+    }
+
+    List<cakeslice.Outline> outline = new List<cakeslice.Outline>();
+
+    public void SetOutline(Transform t)
+    {
+        MeshRenderer[] mr = t.GetComponentsInChildren<MeshRenderer>(false);
+        SkinnedMeshRenderer[] smr = t.GetComponentsInChildren<SkinnedMeshRenderer>(false);
+
+        for (int i = 0; i < mr.Length; i++)
+            if (!mr[i].gameObject.GetComponent<cakeslice.Outline>() && !mr[i].gameObject.CompareTag("Ignore Outline"))
+                outline.Add(mr[i].gameObject.AddComponent<cakeslice.Outline>());
+
+        for (int i = 0; i < smr.Length; i++)
+            if (!smr[i].gameObject.GetComponent<cakeslice.Outline>() && !smr[i].gameObject.CompareTag("Ignore Outline"))
+                outline.Add(smr[i].gameObject.AddComponent<cakeslice.Outline>());
+
+        ShowOutline(flag);
+    }
+
+    public void ShowOutline(bool flag)
+    {
+        for (int i = 0; i < outline.Count; i++)
+        {
+            if (outline[i])
+            {
+                outline[i].enabled = true;
+                outline[i].enabled = flag;
+            }
+        }
+    }
+
+    public void SetToggleVisual(GameObject active, GameObject inActive, bool status)
+    {
+        active.SetActive(status);
+        inActive.SetActive(!status);
+
+        Manager.lightManager.AddActive(go);
+        Manager.lightManager.RemoveInactive(go);
+    }
+
+    public void SetPickUpShine(bool flag)
+    {
+        Access3DPickUpShine shine = GetComponent<Access3DPickUpShine>();
+
+        if (shine)
+            SetPickUpShine(shine, flag);
+    }
+
+    public void SetPickUpShine(Access3DPickUpShine shine, bool flag)
+    {
+        if (flag)
+            shine.SetShine();
+        else
+            shine.SetNormal();
+    }
+
+    Access3DCheckRbHalt a3CheckRbHalt;
+
+    public void CheckRbHalt(bool processEnd)
+    {
+        if (a3CheckRbHalt)
+            a3CheckRbHalt.Deactivate(processEnd);
+    }
+
+    public void ResetRbMovement()
+    {
+        if (rb)
+        {
+            rb.velocity = Vector3.zero;
+            rb.isKinematic = true;
+            rb.isKinematic = false;
+        }
+    }
+
+    [HideInInspector] public float initialRbDrag;
+    [HideInInspector] public float initialRbRotDrag;
+
+    public void AddRigidbodyToDrop(Vector3 direction, float pow, Access3DCheckRbHalt.OnEndEnter onEndEnter)
+    {
+        if (!rb)
+        {
+            rb = gameObject.AddComponent<Rigidbody>();
+
+            initialRbDrag = rb.drag;
+            initialRbRotDrag = rb.angularDrag;
+        }
+
+        // if already has one reset velocity or torque
+        ResetRbMovement();
+
+        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        rb.AddExplosionForce(pow, t.position - direction, 10);
+
+        a3CheckRbHalt = gameObject.AddComponent<Access3DCheckRbHalt>().Set(t, this, onEndEnter);
+
+        //print(gameObject + " > " + "AddRigidbodyToDrop");
+    }
+
+    public void RemoveRigidbody()
+    {
+        if (rb)
+            Destroy(rb);
+    }
+
+    public Vector3 GetLocalDirection(Vector3 direction)
+    {
+        Vector3 local = Vector3.zero;
+
+        if (direction.x == 1)
+            local = t.right;
+        else if (direction.x == -1)
+            local = t.right * -1;
+
+        if (direction.y == 1)
+            local = t.up;
+        else if (direction.y == -1)
+            local = t.up * -1;
+
+        if (direction.z == 1)
+            local = t.forward;
+        else if (direction.z == -1)
+            local = t.forward * -1;
+
+        return local;
+    }
+
+    public void CheckMonsterVolumeAlert()
+    {
+        if (Manager.monsterMain)
+            Manager.monsterMain.CheckAlertDistance(t.position, volumeLevel);
+    }
+
+    public float parenateAnimTransUpwardRev = 0.1f;
+
+    public void ParenateToAnimTrans()
+    {
+        if (t == null)
+            return;
+
+        RaycastHit[] hits = Physics.RaycastAll(t.position + Vector3.up * parenateAnimTransUpwardRev, Vector3.down, 0.25f);
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Access3DAnimTrans animTrans = hits[i].collider.GetComponentInParent<Access3DAnimTrans>();
+
+            if (animTrans)
+            {
+                // parent this to anim trans found to move with it
+                t.parent = animTrans.transform;
+
+                //print(animTrans.gameObject);
+
+                return;
+            }
+        }
+    }
+
+    [HideInInspector] public List<Access3D> topplee = new List<Access3D>();
+    [HideInInspector] public List<Access3D> toppler = new List<Access3D>();
+
+    public void SetToppleBelowItem()
+    {
+        if (t == null)
+            return;
+
+        // find below wield and give this as topple
+        RaycastHit[] hits = Physics.RaycastAll(t.position + Vector3.up * 0.1f, Vector3.down, 0.25f);
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Access3D a3 = hits[i].collider.GetComponent<Access3D>();
+
+            if (a3 &&
+                a3 != this &&
+                a3.wield &&
+                !HasTopplee(this))
+            {
+                a3.topplee.Add(this);
+
+                toppler.Add(a3);
+            }
+        }
+    }
+
+    public bool HasTopplee(Access3D client)
+    {
+        for (int i = 0; i < topplee.Count; i++)
+            if (topplee[i] == client)
+                return true;
+
+        return false;
+    }
+
+    public void ProcessTopplee()
+    {
+        for (int i = 0; i < topplee.Count; i++)
+        {
+            if (topplee[i] &&
+                !topplee[i].rb)
+            {
+                if(topplee[i].go.activeInHierarchy)
+                    topplee[i].AddDropRB();
+
+                topplee[i].ProcessTopplee();
+            }
+        }
+
+        NotifyToppleeRemove();
+    }
+
+    public void NotifyTopplerRemove()
+    {
+        for (int i = 0; i < toppler.Count; i++)
+            if (toppler[i])
+                toppler[i].RemoveTopplee(this);
+
+        toppler.Clear();
+    }
+
+    public void NotifyToppleeRemove()
+    {
+        for (int i = 0; i < topplee.Count; i++)
+            if (topplee[i])
+                topplee[i].RemoveToppler(this);
+
+        topplee.Clear();
+    }
+
+    public void RemoveTopplee(Access3D client)
+    {
+        for (int i = topplee.Count - 1; i >= 0; i--)
+            if (topplee[i] == client)
+                topplee.RemoveAt(i);
+    }
+
+    public void RemoveToppler(Access3D client)
+    {
+        for (int i = toppler.Count - 1; i >= 0; i--)
+            if (toppler[i] == client)
+                toppler.RemoveAt(i);
+    }
+
+    public void AddDropRB()
+    {
+        t.parent = null;
+
+        AddRigidbodyToDrop(Manager.Vector2D(Manager.m.cameraFPS.t.forward), 0, null);
+    }
+
+    Collider[] col;
+
+    [HideInInspector] public bool colFlag;
+
+    public Collider[] GetCol()
+    {
+        if (col == null)
+            col = GetComponentsInChildren<Collider>();
+
+        return col;
+    }
+
+    public void SetAllCollider(bool flag)
+    {
+        Collider[] col = GetCol();
+
+        for (int i = 0; i < col.Length; i++)
+            if (col[i])
+                col[i].enabled = flag;
+
+        colFlag = flag;
+
+        SetPermaCol();
+    }
+
+    public void SetAllColliderTrigger(bool flag)
+    {
+        Collider[] col = GetCol();
+
+        for (int i = 0; i < col.Length; i++)
+            if (col[i])
+                col[i].isTrigger = flag;
+    }
+
+    public Collider[] permaCol;
+
+    void SetPermaCol()
+    {
+        for (int i = 0; i < permaCol.Length; i++)
+            permaCol[i].enabled = true;
+    }
+
+    public void Summon()
+    {
+        SummonSpirit();
+        SummonWife();
+    }
+
+    public void Unsummon()
+    {
+        UnsummonSpirit();
+        UnsummonWife();
+    }
+
+    bool CanSummonSpirit()
+    {
+        return !Manager.m.isUnderwater &&
+            !Manager.GetUserFPS().isSummonSpiritProhibited;
+    }
+
+    public void SummonSpirit()
+    {
+        Access3DSummonSpirit summonSpirit = GetComponent<Access3DSummonSpirit>();
+
+        if (summonSpirit && CanSummonSpirit())
+            summonSpirit.Set();
+    }
+
+    public void UnsummonSpirit()
+    {
+        Access3DSummonSpirit summonSpirit = GetComponent<Access3DSummonSpirit>();
+
+        if (summonSpirit && summonSpirit.spirit)
+            summonSpirit.spirit.OnDisappear();
+    }
+
+    bool CanSummonWife()
+    {
+        return !Manager.m.isUnderwater &&
+            !Manager.GetUserFPS().isSummonWifeProhibited;
+    }
+
+    public void SummonWife()
+    {
+        Access3DSummonWife summonWife = GetComponent<Access3DSummonWife>();
+
+        if (summonWife && CanSummonWife())
+            summonWife.Set();
+    }
+
+    public void UnsummonWife()
+    {
+        Access3DSummonWife summonWife = GetComponent<Access3DSummonWife>();
+
+        if (summonWife)
+            summonWife.DestroyMonster();
+    }
+}
