@@ -1,0 +1,405 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Imp : MonoBehaviour
+{
+    delegate void Process();
+    Process process;
+
+    Access3D root;
+    Transform navT;
+    NpcHeadOnly npcHeadOnly;
+    Vector3 initialWorldPos;
+
+    [HideInInspector] public Entity entity;
+
+    public Renderer render;
+    public Sprite icon;
+    public AudioClip[] clipAttack;
+    public Transform[] itemHolder;
+    public float followRange;
+    public GameObject startingWield;
+
+    private void Awake()
+    {
+        entity = GetComponent<Entity>();
+
+        root = GetComponent<Access3D>();
+        root.setMainWindow += OnAccessEnter;
+
+        navT = entity.navAgent.transform;
+        npcHeadOnly = GetComponent<NpcHeadOnly>();
+
+        root.SetOutline(entity.t);
+
+        initialWorldPos = entity.t.position;
+
+        entity.SetRagdoll(false);
+    }
+
+    void Start()
+    {        
+        OnWaitEnter();
+
+        if (startingWield)
+            InstantWield(startingWield);
+    }
+
+    private void OnEnable()
+    {
+        StartCoroutine(ProcessTurn());
+        StartCoroutine(ProcessSteal());
+        StartCoroutine(ProcessKill());
+    }
+
+    private void Update()
+    {
+        if (process != null)
+            process();
+
+        CheckStolen();
+    }
+
+    bool IsBeingCasted()
+    {
+        return Manager.GetUserFPS().isCasting && Manager.GetCanvasRayDirector().IsAccess3DFound(root);
+    }
+
+    void PlayAnimIdle()
+    {
+        entity.SetAnimStatus(0);
+    }
+
+    void PlayAnimWalk()
+    {
+        entity.SetAnimStatus(1);
+    }
+
+    void PlayAnimStealRight()
+    {
+        entity.anim.SetTrigger("Steal Right");
+    }
+
+    void PlayAnimStealLeft()
+    {
+        entity.anim.SetTrigger("Steal Left");
+    }
+
+    void PlayAnimTurnLeft()
+    {
+        entity.anim.applyRootMotion = true;
+
+        entity.anim.SetTrigger("Turn Left");
+    }
+
+    void PlayAnimTurnRight()
+    {
+        entity.anim.applyRootMotion = true;
+
+        entity.anim.SetTrigger("Turn Right");
+    }
+
+    void OnAccessEnter()
+    {
+        if (Manager.HasRequiredItem(Item.ID.TotemDegtia, true, true) &&
+            wieldRight == null &&
+            !IsTotemed())
+            ReceiveTotem();
+    }
+
+    void ReceiveTotem()
+    {
+        StealRight(WieldType.Both, false, true);
+
+        OnTotemedEnter();
+    }
+
+    void OnTotemedEnter()
+    {
+        process = Totemed;
+
+        npcHeadOnly.SetTargetToLook(null);
+
+        entity.navAgent.isStopped = true;
+
+        entity.anim.speed = 0;
+
+        entity.actionTime = 0;
+        entity.actionDuration = Random.Range(60 * 4.5f, 60 * 8);
+    }
+
+    void Totemed()
+    {
+        bool hasTotem = wieldRight ? wieldRight.root.item.id == Item.ID.TotemDegtia : false;
+
+        entity.actionTime += Time.deltaTime;
+
+        // destroy and wake up after awhile
+        if (hasTotem &&
+            entity.actionTime > entity.actionDuration)
+            Destroy(wieldRight.root.go);
+
+        if (!hasTotem)
+        {
+            entity.anim.speed = 1;
+            
+            OnIdleEnter();
+        }
+    }
+
+    bool IsTotemed()
+    {
+        return process == Totemed;
+    }
+
+    IEnumerator ProcessKill()
+    {
+        while (entity.isAlive)
+        {
+            yield return new WaitForSeconds(1);
+
+            // if not in sight and near
+            if (!render.isVisible &&
+                entity.IsTargetInAttackRange(stealRange) &&
+                !IsTotemed())
+            {
+                if (!Manager.m.isGameOver)
+                    for (int i = 0; i < clipAttack.Length; i++)
+                        Manager.GetUISoundManager().Play(clipAttack[i], true);
+
+                Manager.m.GameOver();
+            }
+        }
+    }
+
+    Access3DItemWield wieldLeft;
+    Access3DItemWield wieldRight;
+    float stealRange = 0.85f;
+
+    IEnumerator ProcessSteal()
+    {
+        while (entity.isAlive)
+        {
+            yield return new WaitForSeconds(1);
+
+            // steal if in front of and near
+            if (npcHeadOnly.IsTargetLookInfront(60) &&
+                entity.HasArrivedAtTargetToMove(stealRange) &&
+                Manager.HasRayHitUser(entity.center.position, stealRange) &&
+                !IsTotemed())
+            {
+                StealLeft(WieldType.Left, true, false);
+                StealLeft(WieldType.Head, true, false);
+
+                StealRight(WieldType.Right, true, false);
+                StealRight(WieldType.Both, true, false);
+            }
+        }
+    }
+
+    void CheckStolen()
+    {
+        // stolen again?
+        if (wieldLeft && wieldLeft.wielder != entity)
+            wieldLeft = null;
+
+        if (wieldRight && wieldRight.wielder != entity)
+            wieldRight = null;
+    }
+
+    void StealLeft(WieldType type, bool playAnim, bool ignoreWanted)
+    {
+        Access3DItemWield leftFound = Manager.GetUserFPS().GetWield(type, Manager.GetUserFPS().swapIndex);
+
+        if (!wieldLeft &&
+            leftFound)
+        {
+            if (leftFound.wantedByImp ||
+                ignoreWanted)
+            {
+                wieldLeft = leftFound;
+
+                Manager.GetUserFPS().SetItemTakenAway(wieldLeft);
+
+                wieldLeft.OnWieldEnter(entity, WieldClient.NPC, itemHolder);
+
+                if (playAnim)
+                    PlayAnimStealLeft();
+            }
+        }
+    }
+
+    void StealRight(WieldType type, bool playAnim, bool ignoreWanted)
+    {
+        Access3DItemWield rightFound = Manager.GetUserFPS().GetWield(type, Manager.GetUserFPS().swapIndex);
+
+        if (!wieldRight &&
+            rightFound)
+        {
+            if (rightFound.wantedByImp ||
+                ignoreWanted)
+            {
+                wieldRight = rightFound;
+
+                Manager.GetUserFPS().SetItemTakenAway(wieldRight);
+
+                wieldRight.OnWieldEnter(entity, WieldClient.NPC, itemHolder);
+
+                if (playAnim)
+                    PlayAnimStealRight();
+            }
+        }
+    }
+
+    void OnWaitEnter()
+    {
+        process = Wait;
+
+        entity.navAgent.isStopped = true;
+
+        PlayAnimIdle();
+
+        npcHeadOnly.SetTargetToLook(Manager.GetUserFPS().entity.head);
+
+        entity.actionTime = 0;
+        entity.actionDuration = Random.Range(3.5f, 12.5f);
+    }
+
+    void Wait()
+    {
+        entity.actionTime += Time.deltaTime;
+
+        if (entity.actionTime > entity.actionDuration)
+        {
+            entity.actionTime = 0;
+            entity.actionDuration = Random.Range(3.5f, 12.5f);
+
+            if (IsTargetToMoveInFollowRange())
+                OnIdleEnter();
+        }
+    }
+
+    bool IsTargetToMoveInFollowRange()
+    {
+        return (Manager.GetUserFPS().entity.t.position - initialWorldPos).sqrMagnitude < followRange * followRange;
+    }
+
+    void OnDrawGizmosSelected()
+    {
+        Gizmos.color = Color.white;
+
+        Gizmos.DrawWireSphere(initialWorldPos != Vector3.zero ? initialWorldPos : transform.position, followRange);
+    }
+
+    void OnIdleEnter()
+    {
+        process = Idle;
+
+        entity.navAgent.isStopped = true;
+
+        PlayAnimIdle();
+
+        npcHeadOnly.SetTargetToLook(Manager.GetUserFPS().entity.head);
+
+        entity.actionTime = 0;
+        entity.actionDuration = Random.Range(1.5f, 4.5f);
+    }
+
+    void Idle()
+    {
+        entity.actionTime += Time.deltaTime;
+
+        if (entity.actionTime > entity.actionDuration)
+        {
+            entity.actionTime = 0;
+            entity.actionDuration = Random.Range(1.5f, 4.5f);
+
+            if (IsTargetToMoveInFollowRange() &&
+                !entity.HasArrivedAtTargetToMove(stealRange))
+                OnMoveEnter();
+        }
+    }
+
+    void OnMoveEnter()
+    {
+        process = Move;
+
+        entity.SetTargetToMove(Manager.GetUserFPS().entity.t);
+        entity.SetTargetToAttack(Manager.GetUserFPS().entity);
+
+        PlayAnimWalk();
+    }
+
+    void Move()
+    {
+        FindOpenDoorForward();
+
+        entity.SetNavDest();
+        entity.MoveRootMotionIfVisible(render, navT, 1.0f);
+
+        if (entity.ProcessActionTime(0.2f))
+        {
+            if (entity.HasArrivedAtTargetToMove(stealRange))
+                OnIdleEnter();
+
+            if (!IsTargetToMoveInFollowRange())
+                OnWaitEnter();
+        }
+    }
+
+    IEnumerator ProcessTurn()
+    {
+        while (entity.isAlive)
+        {
+            yield return new WaitForSeconds(1);
+
+            if (process == Idle &&
+                !IsTotemed() &&
+                Manager.m.cameraFPS.IsNormalCam())
+                Turn();
+        }
+    }
+
+    void Turn()
+    {
+        float angle = npcHeadOnly.GetTargetLookAngleSigned();
+        float limit = 50;
+
+        if (angle > limit)
+            PlayAnimTurnLeft();
+        else if (angle < -limit)
+            PlayAnimTurnRight();
+    }
+
+    void OnTurnEnd()
+    {
+    }
+
+    void Destroy()
+    {
+        Destroy(gameObject);
+    }
+
+    void FindOpenDoorForward()
+    {
+        entity.FindOpenDoorForward(entity.permaCol);
+    }
+
+    public Access3DItemWield InstantWield(GameObject go)
+    {
+        Access3DItemWield item = Instantiate(go, entity.t.position - Manager.m.cameraFPS.t.forward * 10, Quaternion.identity).GetComponent<Access3DItemWield>();
+
+        item.Init();
+        item.OnWieldEnter(entity, WieldClient.NPC, itemHolder);
+
+        if (item.type == WieldType.Left ||
+            item.type == WieldType.Head)
+            wieldLeft = item;
+        else if (item.type == WieldType.Right ||
+            item.type == WieldType.Both)
+            wieldRight = item;
+
+        return item;
+    }
+}
